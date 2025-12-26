@@ -1,0 +1,431 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-salem_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_backups:/backups
+    ports:
+      - "5432:5432"
+    networks:
+      - salem_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Dragonfly Cache
+  dragonfly:
+    image: docker.dragonflydb.io/dragonfly:latest
+    container_name: dragonfly
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly_data:/data
+    networks:
+      - salem_network
+    command: --maxmemory 512mb --loglevel info
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    labels:
+      com.example.description: "Dragonfly cache server"
+
+  # MongoDB
+  mongo:
+    image: mongo:7.0
+    container_name: mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-secure_password}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-salem_mongo}
+    volumes:
+      - mongo_data:/data/db
+      - mongo_backups:/backups
+    ports:
+      - "27017:27017"
+    networks:
+      - salem_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # n8n - Workflow Automation
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-secure_password}
+      - N8N_HOST=${N8N_HOST:-n8n.mitechconsult.com}
+      - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-postgres}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:-secure_password}
+      - WEBHOOK_URL=https://n8n.mitechconsult.com/
+      - EXTERNAL_HOOK_URLS=https://n8n.mitechconsult.com/
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - n8n_r2:/mnt/r2
+    ports:
+      - "5678:5678"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.n8n.rule: "Host(`n8n.mitechconsult.com`)"
+      traefik.http.routers.n8n.entrypoints: "websecure"
+      traefik.http.routers.n8n.tls.certresolver: "letsencrypt"
+      traefik.http.services.n8n.loadbalancer.server.port: "5678"
+    restart: unless-stopped
+
+  # Unstructured - Document Processing
+  unstructured:
+    image: quay.io/unstructured-io/unstructured-api:latest
+    container_name: unstructured
+    environment:
+      - ALLOWED_HOSTS=["*"]
+      - LOG_LEVEL=INFO
+    volumes:
+      - unstructured_data:/tmp/unstructured
+      - unstructured_r2:/mnt/r2
+    ports:
+      - "8000:8000"
+    networks:
+      - salem_network
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.unstructured.rule: "Host(`unstructured.mitechconsult.com`)"
+      traefik.http.routers.unstructured.entrypoints: "websecure"
+      traefik.http.routers.unstructured.tls.certresolver: "letsencrypt"
+      traefik.http.services.unstructured.loadbalancer.server.port: "8000"
+    restart: unless-stopped
+
+  # Mem0 - Memory Management
+  mem0:
+    image: mem0/mem0:latest
+    container_name: mem0
+    environment:
+      - MEM0_API_KEY=${MEM0_API_KEY:-your_api_key}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/mem0_db
+      - REDIS_URL=redis://dragonfly:6379/0
+    volumes:
+      - mem0_data:/app/data
+      - mem0_r2:/mnt/r2
+    ports:
+      - "8001:8000"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.mem0.rule: "Host(`mem0.mitechconsult.com`)"
+      traefik.http.routers.mem0.entrypoints: "websecure"
+      traefik.http.routers.mem0.tls.certresolver: "letsencrypt"
+      traefik.http.services.mem0.loadbalancer.server.port: "8000"
+    restart: unless-stopped
+
+  # Graphiti - Graph Knowledge Base
+  graphiti:
+    image: graphiti/graphiti:latest
+    container_name: graphiti
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/graphiti_db
+      - REDIS_URL=redis://dragonfly:6379/1
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-secure_password}
+    volumes:
+      - graphiti_data:/app/data
+      - graphiti_r2:/mnt/r2
+    ports:
+      - "8002:8000"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.graphiti.rule: "Host(`graphiti.mitechconsult.com`)"
+      traefik.http.routers.graphiti.entrypoints: "websecure"
+      traefik.http.routers.graphiti.tls.certresolver: "letsencrypt"
+      traefik.http.services.graphiti.loadbalancer.server.port: "8000"
+    restart: unless-stopped
+
+  # FastMCP - Model Context Protocol Server
+  fastmcp:
+    image: fastmcp/fastmcp:latest
+    container_name: fastmcp
+    environment:
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8003
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://dragonfly:6379/2
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/fastmcp_db
+    volumes:
+      - fastmcp_data:/app/data
+      - fastmcp_r2:/mnt/r2
+    ports:
+      - "8003:8003"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.fastmcp.rule: "Host(`fastmcp.mitechconsult.com`)"
+      traefik.http.routers.fastmcp.entrypoints: "websecure"
+      traefik.http.routers.fastmcp.tls.certresolver: "letsencrypt"
+      traefik.http.services.fastmcp.loadbalancer.server.port: "8003"
+    restart: unless-stopped
+
+  # LobChat - Chat Interface
+  lobchat:
+    image: lobehub/lobe-chat:latest
+    container_name: lobchat
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-}
+      - ACCESS_CODE=${LOBCHAT_ACCESS_CODE:-}
+      - LOBE_REDIS_URL=redis://dragonfly:6379/3
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/lobchat_db
+    volumes:
+      - lobchat_data:/app/data
+      - lobchat_r2:/mnt/r2
+    ports:
+      - "3210:3210"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.lobchat.rule: "Host(`lobchat.mitechconsult.com`)"
+      traefik.http.routers.lobchat.entrypoints: "websecure"
+      traefik.http.routers.lobchat.tls.certresolver: "letsencrypt"
+      traefik.http.services.lobchat.loadbalancer.server.port: "3210"
+    restart: unless-stopped
+
+  # LibreChat - Chat Application
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: librechat
+    environment:
+      - MONGO_URI=mongodb://${MONGO_USER:-admin}:${MONGO_PASSWORD:-secure_password}@mongo:27017/${MONGO_DB:-salem_mongo}?authSource=admin
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REDIS_URI=redis://dragonfly:6379/4
+      - HOST=0.0.0.0
+      - PORT=3080
+      - NODE_ENV=production
+      - DOMAIN_CLIENT=https://librechat.mitechconsult.com
+      - DOMAIN_SERVER=https://librechat.mitechconsult.com
+    volumes:
+      - librechat_data:/app/data
+      - librechat_logs:/app/logs
+      - librechat_r2:/mnt/r2
+    ports:
+      - "3080:3080"
+    networks:
+      - salem_network
+    depends_on:
+      mongo:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.librechat.rule: "Host(`librechat.mitechconsult.com`)"
+      traefik.http.routers.librechat.entrypoints: "websecure"
+      traefik.http.routers.librechat.tls.certresolver: "letsencrypt"
+      traefik.http.services.librechat.loadbalancer.server.port: "3080"
+    restart: unless-stopped
+
+  # Open WebUI - LLM Web Interface
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: open-webui
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-}
+      - WEBUI_AUTH=true
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/openwebui_db
+      - WEBUI_PORT=8080
+    volumes:
+      - open_webui_data:/app/backend/data
+      - open_webui_r2:/mnt/r2
+    ports:
+      - "8080:8080"
+    networks:
+      - salem_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.openwebui.rule: "Host(`openwebui.mitechconsult.com`)"
+      traefik.http.routers.openwebui.entrypoints: "websecure"
+      traefik.http.routers.openwebui.tls.certresolver: "letsencrypt"
+      traefik.http.services.openwebui.loadbalancer.server.port: "8080"
+    restart: unless-stopped
+
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    command:
+      - "--api.insecure=false"
+      - "--api.dashboard=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@mitechconsult.com}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_certs:/letsencrypt
+      - traefik_logs:/var/log/traefik
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8888:8080"
+    networks:
+      - salem_network
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.traefik.rule: "Host(`traefik.mitechconsult.com`)"
+      traefik.http.routers.traefik.entrypoints: "websecure"
+      traefik.http.routers.traefik.tls.certresolver: "letsencrypt"
+      traefik.http.routers.traefik.service: "api@internal"
+      traefik.http.middlewares.basicauth.basicauth.users: "${TRAEFIK_USER:-admin}:${TRAEFIK_PASSWORD_HASH:-}"
+      traefik.http.routers.traefik.middlewares: "basicauth"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  # Database volumes
+  postgres_data:
+    driver: local
+  postgres_backups:
+    driver: local
+  dragonfly_data:
+    driver: local
+  mongo_data:
+    driver: local
+  mongo_backups:
+    driver: local
+
+  # Service volumes
+  n8n_data:
+    driver: local
+  n8n_r2:
+    driver: local
+  unstructured_data:
+    driver: local
+  unstructured_r2:
+    driver: local
+  mem0_data:
+    driver: local
+  mem0_r2:
+    driver: local
+  graphiti_data:
+    driver: local
+  graphiti_r2:
+    driver: local
+  fastmcp_data:
+    driver: local
+  fastmcp_r2:
+    driver: local
+  lobchat_data:
+    driver: local
+  lobchat_r2:
+    driver: local
+  librechat_data:
+    driver: local
+  librechat_logs:
+    driver: local
+  librechat_r2:
+    driver: local
+  open_webui_data:
+    driver: local
+  open_webui_r2:
+    driver: local
+
+  # Traefik volumes
+  traefik_certs:
+    driver: local
+  traefik_logs:
+    driver: local
+
+networks:
+  salem_network:
+    driver: bridge
+    name: salem_network
+
+# Environment variables reference
+# Create a .env file with the following variables:
+# POSTGRES_DB=salem_db
+# POSTGRES_USER=postgres
+# POSTGRES_PASSWORD=secure_password
+# MONGO_USER=admin
+# MONGO_PASSWORD=secure_password
+# MONGO_DB=salem_mongo
+# N8N_USER=admin
+# N8N_PASSWORD=secure_password
+# N8N_HOST=n8n.mitechconsult.com
+# MEM0_API_KEY=your_api_key
+# NEO4J_PASSWORD=secure_password
+# OPENAI_API_KEY=your_openai_api_key
+# OPENAI_API_BASE_URL=https://api.openai.com/v1
+# LOBCHAT_ACCESS_CODE=your_access_code
+# ACME_EMAIL=admin@mitechconsult.com
+# TRAEFIK_USER=admin
+# TRAEFIK_PASSWORD_HASH=your_htpasswd_hash
